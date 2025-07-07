@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
@@ -31,14 +32,13 @@ var (
 
 type RecordingKV struct {
 	inner         *triedb.Database
-	diskDb        ethdb.KeyValueStore
+	memDb         *memorydb.Database
 	readDbEntries map[common.Hash][]byte
 	mutex         sync.Mutex
-	enableBypass  bool
 }
 
-func newRecordingKV(inner *triedb.Database, diskDb ethdb.KeyValueStore) *RecordingKV {
-	return &RecordingKV{inner, diskDb, make(map[common.Hash][]byte), sync.Mutex{}, false}
+func newRecordingKV(inner *triedb.Database) *RecordingKV {
+	return &RecordingKV{inner, memorydb.New(), make(map[common.Hash][]byte), sync.Mutex{}}
 }
 
 func (db *RecordingKV) Has(key []byte) (bool, error) {
@@ -51,6 +51,10 @@ func (db *RecordingKV) DeleteRange(start, end []byte) error {
 
 // Get may be called concurrently with other Get calls
 func (db *RecordingKV) Get(key []byte) ([]byte, error) {
+	if res, err := db.memDb.Get(key); err == nil {
+		return res, nil
+	}
+
 	var hash common.Hash
 	var res []byte
 	var err error
@@ -60,15 +64,12 @@ func (db *RecordingKV) Get(key []byte) ([]byte, error) {
 	} else if len(key) == len(rawdb.CodePrefix)+32 && bytes.HasPrefix(key, rawdb.CodePrefix) {
 		// Retrieving code
 		copy(hash[:], key[len(rawdb.CodePrefix):])
-		res, err = db.diskDb.Get(key)
+		res, err = db.inner.Disk().Get(key)
 	} else {
 		err = fmt.Errorf("recording KV attempted to access non-hash key %v", hex.EncodeToString(key))
 	}
 	if err != nil {
 		return nil, err
-	}
-	if db.enableBypass {
-		return res, nil
 	}
 	if crypto.Keccak256Hash(res) != hash {
 		return nil, fmt.Errorf("recording KV attempted to access non-hash key %v", hash)
@@ -88,27 +89,15 @@ func (db *RecordingKV) Delete(key []byte) error {
 }
 
 func (db *RecordingKV) NewBatch() ethdb.Batch {
-	if db.enableBypass {
-		return db.diskDb.NewBatch()
-	}
-	log.Error("recording KV: attempted to create batch when bypass not enabled")
-	return nil
+	return db.memDb.NewBatch()
 }
 
 func (db *RecordingKV) NewBatchWithSize(size int) ethdb.Batch {
-	if db.enableBypass {
-		return db.diskDb.NewBatchWithSize(size)
-	}
-	log.Error("recording KV: attempted to create batch when bypass not enabled")
-	return nil
+	return db.memDb.NewBatchWithSize(size)
 }
 
 func (db *RecordingKV) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	if db.enableBypass {
-		return db.diskDb.NewIterator(prefix, start)
-	}
-	log.Error("recording KV: attempted to create iterator when bypass not enabled")
-	return nil
+	panic("recording KV doesn't support NewIterator")
 }
 
 func (db *RecordingKV) Stat() (string, error) {
@@ -120,16 +109,11 @@ func (db *RecordingKV) Compact(start []byte, limit []byte) error {
 }
 
 func (db *RecordingKV) Close() error {
-	return nil
+	return db.memDb.Close()
 }
-
-func (db *RecordingKV) Release() {}
 
 func (db *RecordingKV) GetRecordedEntries() map[common.Hash][]byte {
 	return db.readDbEntries
-}
-func (db *RecordingKV) EnableBypass() {
-	db.enableBypass = true
 }
 
 type RecordingChainContext struct {
@@ -264,7 +248,7 @@ func (r *RecordingDatabase) PrepareRecording(ctx context.Context, lastBlockHeade
 	}
 	finalDereference := lastBlockHeader // dereference in case of error
 	defer func() { r.Dereference(finalDereference) }()
-	recordingKeyValue := newRecordingKV(r.db.TrieDB(), r.db.DiskDB())
+	recordingKeyValue := newRecordingKV(r.db.TrieDB())
 
 	recordingStateDatabase := state.NewDatabase(triedb.NewDatabase(rawdb.WrapDatabaseWithWasm(rawdb.NewDatabase(recordingKeyValue), r.db.WasmStore()), nil), nil)
 	var prevRoot common.Hash
