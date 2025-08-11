@@ -50,6 +50,7 @@ type ArbitrumChainParams struct {
 	EnableArbOS               bool
 	AllowDebugPrecompiles     bool
 	DataAvailabilityCommittee bool
+	Syndicate                 bool
 	InitialArbOSVersion       uint64
 	InitialChainOwner         common.Address
 	GenesisBlockNum           uint64
